@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM Proxy (Lightweight)
+// server.js - OpenAI to NVIDIA NIM Proxy (Fix 404)
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -21,7 +21,27 @@ const MODEL_MAPPING = {
 app.use(cors());
 app.use(express.json());
 
+// ============= LOGGING =============
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
 // ============= ROUTES =============
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'OpenAI to NVIDIA NIM Proxy',
+    endpoints: {
+      health: '/health',
+      models: '/v1/models',
+      chat: '/v1/chat/completions'
+    }
+  });
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ 
@@ -45,10 +65,18 @@ app.get('/v1/models', (req, res) => {
   });
 });
 
-// Chat completions
+// Chat completions (chính)
 app.post('/v1/chat/completions', async (req, res) => {
   try {
+    console.log('Request body:', JSON.stringify(req.body).substring(0, 200));
+    
     const { model, messages, temperature, max_tokens, stream } = req.body;
+    
+    if (!model) {
+      return res.status(400).json({
+        error: { message: 'Model is required', type: 'invalid_request_error', code: 400 }
+      });
+    }
     
     // Get model mapping
     let nimModel = MODEL_MAPPING[model];
@@ -65,6 +93,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       max_tokens: max_tokens || 4096,
       stream: stream || false
     };
+    
+    console.log(`Using NIM model: ${nimModel}`);
     
     // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -119,6 +149,10 @@ app.post('/v1/chat/completions', async (req, res) => {
     
   } catch (error) {
     console.error('Proxy error:', error.message);
+    if (error.response) {
+      console.error('Response status:', error.response.status);
+      console.error('Response data:', error.response.data);
+    }
     
     const statusCode = error.response?.status || 500;
     const errorMessage = error.response?.data?.error?.message || error.message || 'Internal server error';
@@ -133,15 +167,37 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// Catch-all
-app.all('*', (req, res) => {
-  res.status(404).json({
-    error: {
-      message: `Endpoint ${req.path} not found`,
-      type: 'invalid_request_error',
-      code: 404
-    }
-  });
+// ============= FIX: Support /v1/chat/completions với trailing slash =============
+app.post('/v1/chat/completions/', async (req, res) => {
+  // Forward to main endpoint
+  req.url = '/v1/chat/completions';
+  app._router.handle(req, res);
+});
+
+// ============= FIX: Support OpenAI compatible endpoints =============
+app.post('/chat/completions', async (req, res) => {
+  req.url = '/v1/chat/completions';
+  app._router.handle(req, res);
+});
+
+app.post('/chat/completions/', async (req, res) => {
+  req.url = '/v1/chat/completions';
+  app._router.handle(req, res);
+});
+
+// ============= FIX: Support /v1 endpoint =============
+app.post('/v1', async (req, res) => {
+  req.url = '/v1/chat/completions';
+  app._router.handle(req, res);
+});
+
+// ============= DEBUG: Log all requests =============
+app.use((req, res, next) => {
+  if (req.method === 'POST' && req.path.includes('chat')) {
+    console.log('POST to:', req.path);
+    console.log('Headers:', req.headers);
+  }
+  next();
 });
 
 // ============= START SERVER =============
@@ -149,4 +205,6 @@ app.listen(PORT, () => {
   console.log(`🚀 OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`📋 Available models: ${Object.keys(MODEL_MAPPING).join(', ')}`);
+  console.log(`🔗 Chat endpoint: http://localhost:${PORT}/v1/chat/completions`);
+  console.log(`✅ Try: curl http://localhost:${PORT}/health`);
 });
