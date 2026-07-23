@@ -1,4 +1,4 @@
-// server.js - OpenAI to OpenCode Zen Proxy (FREE Models)
+// server.js - OpenAI to OpenCode Zen Proxy (FREE Models - Fixed)
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -15,20 +15,19 @@ const ZEN_API_KEY = process.env.ZEN_API_KEY;
 
 // Model mapping - Chỉ các model FREE
 const MODEL_MAPPING = {
-  // Tên rút gọn -> Model ID đầy đủ cho OpenCode Zen
-  'big-pickle': 'opencode/big-pickle',
-  'deepseek-free': 'opencode/deepseek-v4-flash-free',
-  'mimo-free': 'opencode/mimo-v2.5-free',
-  'laguna-free': 'opencode/laguna-s-2.1-free',
-  'north-free': 'opencode/north-mini-code-free',
-  'nemotron-free': 'opencode/nemotron-3-ultra-free',
+  'big-pickle': 'big-pickle',
+  'deepseek-free': 'deepseek-v4-flash-free',
+  'mimo-free': 'mimo-v2.5-free',
+  'laguna-free': 'laguna-s-2.1-free',
+  'north-free': 'north-mini-code-free',
+  'nemotron-free': 'nemotron-3-ultra-free',
   
-  // Hỗ trợ tên đầy đủ
-  'deepseek-v4-flash-free': 'opencode/deepseek-v4-flash-free',
-  'mimo-v2.5-free': 'opencode/mimo-v2.5-free',
-  'laguna-s-2.1-free': 'opencode/laguna-s-2.1-free',
-  'north-mini-code-free': 'opencode/north-mini-code-free',
-  'nemotron-3-ultra-free': 'opencode/nemotron-3-ultra-free'
+  // Tên đầy đủ
+  'deepseek-v4-flash-free': 'deepseek-v4-flash-free',
+  'mimo-v2.5-free': 'mimo-v2.5-free',
+  'laguna-s-2.1-free': 'laguna-s-2.1-free',
+  'north-mini-code-free': 'north-mini-code-free',
+  'nemotron-3-ultra-free': 'nemotron-3-ultra-free'
 };
 
 // Health check
@@ -36,8 +35,9 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'OpenAI to OpenCode Zen Proxy',
-    version: '1.0.0',
+    version: '1.1.0',
     available_models: Object.keys(MODEL_MAPPING),
+    api_key_configured: !!ZEN_API_KEY,
     timestamp: new Date().toISOString()
   });
 });
@@ -63,26 +63,39 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
 
-    // Validate API key
     if (!ZEN_API_KEY) {
-      throw new Error('ZEN_API_KEY is not configured');
+      return res.status(500).json({
+        error: {
+          message: 'ZEN_API_KEY is not configured',
+          type: 'server_error',
+          code: 500
+        }
+      });
     }
 
-    // Smart model selection
-    let zenModel = getModelMapping(model);
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({
+        error: {
+          message: 'Messages is required and must be a non-empty array',
+          type: 'invalid_request_error',
+          code: 400
+        }
+      });
+    }
 
-    // Transform request
+    let zenModel = getModelMapping(model);
+    
+    console.log(`[Proxy] Model: ${model} -> ${zenModel}`);
+
+    // Tăng max_tokens để tránh finish_reason: "length"
     const zenRequest = {
       model: zenModel,
       messages: messages,
       temperature: temperature || 0.7,
-      max_tokens: Math.min(max_tokens || 4096, 16384),
+      max_tokens: Math.min(max_tokens || 2048, 16384), // Tăng lên 2048 để có response dài hơn
       stream: stream || false
     };
 
-    console.log(`[Proxy] Using model: ${zenModel} for request: ${model || 'default'}`);
-
-    // Make request to OpenCode Zen
     const response = await axios.post(
       `${ZEN_API_BASE}/chat/completions`,
       zenRequest,
@@ -98,16 +111,17 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     );
 
-    // Handle streaming
     if (stream) {
       return handleStreamingResponse(response, res);
     }
 
-    // Handle non-streaming
     return handleNonStreamingResponse(response, res, model);
 
   } catch (error) {
     console.error('Proxy error:', error.message);
+    if (error.response) {
+      console.error('Response data:', JSON.stringify(error.response.data, null, 2));
+    }
     
     const statusCode = error.response?.status || 500;
     const errorMessage = error.response?.data?.error?.message || error.message || 'Internal server error';
@@ -122,37 +136,26 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// Helper functions
 function getModelMapping(model) {
-  if (!model) {
-    // Default model nếu không có model được chỉ định
-    return 'opencode/mimo-v2.5-free';
-  }
+  if (!model) return 'mimo-v2.5-free';
   
-  // Kiểm tra trong MODEL_MAPPING
-  const mapped = MODEL_MAPPING[model];
-  if (mapped) return mapped;
+  if (MODEL_MAPPING[model]) return MODEL_MAPPING[model];
 
-  // Smart fallback
-  const lower = model.toLowerCase();
-  
-  // Map các tên model phổ biến sang model free
-  if (lower.includes('deepseek') || lower.includes('v4') || lower.includes('flash')) {
-    return 'opencode/deepseek-v4-flash-free';
-  } else if (lower.includes('mimo') || lower.includes('v2.5')) {
-    return 'opencode/mimo-v2.5-free';
-  } else if (lower.includes('laguna')) {
-    return 'opencode/laguna-s-2.1-free';
-  } else if (lower.includes('north') || lower.includes('mini')) {
-    return 'opencode/north-mini-code-free';
-  } else if (lower.includes('nemotron')) {
-    return 'opencode/nemotron-3-ultra-free';
-  } else if (lower.includes('pickle')) {
-    return 'opencode/big-pickle';
+  if (model.startsWith('opencode/')) {
+    const withoutPrefix = model.replace('opencode/', '');
+    if (MODEL_MAPPING[withoutPrefix]) return MODEL_MAPPING[withoutPrefix];
+    return withoutPrefix;
   }
+
+  const lower = model.toLowerCase();
+  if (lower.includes('deepseek')) return 'deepseek-v4-flash-free';
+  if (lower.includes('mimo')) return 'mimo-v2.5-free';
+  if (lower.includes('laguna')) return 'laguna-s-2.1-free';
+  if (lower.includes('north')) return 'north-mini-code-free';
+  if (lower.includes('nemotron')) return 'nemotron-3-ultra-free';
+  if (lower.includes('pickle')) return 'big-pickle';
   
-  // Fallback cuối cùng
-  return 'opencode/mimo-v2.5-free';
+  return 'mimo-v2.5-free';
 }
 
 function handleStreamingResponse(response, res) {
@@ -178,16 +181,14 @@ function handleStreamingResponse(response, res) {
 
       try {
         const data = JSON.parse(line.slice(6));
+        // Nếu content null nhưng có reasoning, thay thế
         if (data.choices?.[0]?.delta) {
           const delta = data.choices[0].delta;
-          
-          // Chỉ giữ lại content
-          if (delta.content) {
-            delta.content = delta.content;
-          } else {
-            delta.content = '';
+          if (!delta.content && delta.reasoning) {
+            delta.content = delta.reasoning;
           }
-          delete delta.reasoning_content;
+          delete delta.reasoning;
+          delete delta.reasoning_details;
         }
         res.write(`data: ${JSON.stringify(data)}\n\n`);
       } catch (e) {
@@ -206,23 +207,34 @@ function handleStreamingResponse(response, res) {
 function handleNonStreamingResponse(response, res, originalModel) {
   const data = response.data;
   
+  // Lấy content, xử lý null
+  let content = data.choices?.[0]?.message?.content || '';
+  
+  // Nếu content null nhưng có reasoning, dùng reasoning
+  if (!content || content.trim() === '') {
+    const reasoning = data.choices?.[0]?.message?.reasoning;
+    if (reasoning) {
+      content = reasoning;
+      console.log(`[Proxy] Used reasoning as content (${content.length} chars)`);
+    } else {
+      content = "The model did not generate a response. Please try again with a different prompt.";
+      console.log(`[Proxy] Used fallback message`);
+    }
+  }
+  
   const transformed = {
     id: data.id || `chatcmpl-${Date.now()}`,
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
-    model: originalModel,
-    choices: data.choices?.map(choice => {
-      const content = choice.message?.content || '';
-      
-      return {
-        index: choice.index || 0,
-        message: {
-          role: choice.message?.role || 'assistant',
-          content: content
-        },
-        finish_reason: choice.finish_reason || 'stop'
-      };
-    }) || [],
+    model: originalModel || 'mimo-v2.5-free',
+    choices: [{
+      index: 0,
+      message: {
+        role: 'assistant',
+        content: content
+      },
+      finish_reason: data.choices?.[0]?.finish_reason || 'stop'
+    }],
     usage: data.usage || {
       prompt_tokens: 0,
       completion_tokens: 0,
@@ -244,5 +256,4 @@ app.all('*', (req, res) => {
   });
 });
 
-// Export cho Vercel
 module.exports = app;
