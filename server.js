@@ -11,24 +11,14 @@ app.use(express.json());
 const ZEN_API_KEY = process.env.ZEN_API_KEY;
 const ZEN_API_BASE = 'https://opencode.ai/zen/v1';
 
-// Chỉ giữ các model FREE
+// Chỉ giữ các model FREE - Tên đầy đủ
 const FREE_MODELS = {
   'big-pickle': 'opencode/big-pickle',
-  'deepseek-free': 'opencode/deepseek-v4-flash-free',
-  'mimo-free': 'opencode/mimo-v2.5-free',
-  'laguna-free': 'opencode/laguna-s-2.1-free',
-  'north-free': 'opencode/north-mini-code-free',
-  'nemotron-free': 'opencode/nemotron-3-ultra-free'
-};
-
-// Mapping đơn giản
-const MODEL_MAP = {
-  'gpt-4': FREE_MODELS['mimo-free'],
-  'gpt-3.5': FREE_MODELS['north-free'],
-  'claude': FREE_MODELS['laguna-free'],
-  'gemini': FREE_MODELS['nemotron-free'],
-  'deepseek': FREE_MODELS['deepseek-free'],
-  'default': FREE_MODELS['mimo-free']
+  'deepseek-v4-flash-free': 'opencode/deepseek-v4-flash-free',
+  'mimo-v2.5-free': 'opencode/mimo-v2.5-free',
+  'laguna-s-2.1-free': 'opencode/laguna-s-2.1-free',
+  'north-mini-code-free': 'opencode/north-mini-code-free',
+  'nemotron-3-ultra-free': 'opencode/nemotron-3-ultra-free'
 };
 
 // Health check
@@ -61,10 +51,14 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature = 0.7, max_tokens = 4096, stream = false } = req.body;
     
-    // Lấy model free
-    let zenModel = MODEL_MAP[model] || MODEL_MAP['default'];
-    if (!Object.values(FREE_MODELS).includes(zenModel)) {
-      zenModel = MODEL_MAP['default'];
+    // Kiểm tra model có trong danh sách free không
+    let zenModel = FREE_MODELS[model];
+    if (!zenModel) {
+      return res.status(400).json({ 
+        error: { 
+          message: `Model "${model}" không có trong danh sách free. Các model hỗ trợ: ${Object.keys(FREE_MODELS).join(', ')}` 
+        } 
+      });
     }
 
     const response = await axios.post(
