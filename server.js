@@ -11,7 +11,7 @@ app.use(express.json());
 const ZEN_API_KEY = process.env.ZEN_API_KEY;
 const ZEN_API_BASE = 'https://opencode.ai/zen/v1';
 
-// Chỉ giữ các model FREE - Tên đầy đủ
+// Các model FREE - Tên đầy đủ
 const FREE_MODELS = {
   'big-pickle': 'opencode/big-pickle',
   'deepseek-v4-flash-free': 'opencode/deepseek-v4-flash-free',
@@ -26,7 +26,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'OpenCode FREE Proxy',
-    free_models: Object.keys(FREE_MODELS)
+    free_models: Object.keys(FREE_MODELS),
+    api_key_configured: !!ZEN_API_KEY
   });
 });
 
@@ -44,26 +45,39 @@ app.get('/v1/models', (req, res) => {
 
 // Chat completions
 app.post('/v1/chat/completions', async (req, res) => {
+  // Kiểm tra API key
   if (!ZEN_API_KEY) {
-    return res.status(500).json({ error: { message: 'Missing ZEN_API_KEY' } });
+    return res.status(500).json({ 
+      error: { 
+        message: 'ZEN_API_KEY is not configured. Please add it to environment variables.',
+        type: 'server_error'
+      } 
+    });
   }
 
   try {
     const { model, messages, temperature = 0.7, max_tokens = 4096, stream = false } = req.body;
     
     // Kiểm tra model có trong danh sách free không
-    let zenModel = FREE_MODELS[model];
+    const zenModel = FREE_MODELS[model];
     if (!zenModel) {
       return res.status(400).json({ 
         error: { 
-          message: `Model "${model}" không có trong danh sách free. Các model hỗ trợ: ${Object.keys(FREE_MODELS).join(', ')}` 
+          message: `Model "${model}" not found. Available models: ${Object.keys(FREE_MODELS).join(', ')}` 
         } 
       });
     }
 
+    // Gọi API OpenCode Zen
     const response = await axios.post(
       `${ZEN_API_BASE}/chat/completions`,
-      { model: zenModel, messages, temperature, max_tokens, stream },
+      { 
+        model: zenModel, 
+        messages, 
+        temperature, 
+        max_tokens, 
+        stream 
+      },
       {
         headers: {
           'Authorization': `Bearer ${ZEN_API_KEY}`,
@@ -74,18 +88,35 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     );
 
+    // Xử lý response
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
       response.data.pipe(res);
     } else {
       res.json(response.data);
     }
 
   } catch (error) {
+    console.error('Proxy error:', error.message);
     res.status(error.response?.status || 500).json({
-      error: { message: error.response?.data?.error?.message || error.message }
+      error: { 
+        message: error.response?.data?.error?.message || error.message,
+        type: 'api_error'
+      }
     });
   }
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: {
+      message: `Endpoint ${req.path} not found`,
+      type: 'invalid_request_error'
+    }
+  });
 });
 
 module.exports = app;
