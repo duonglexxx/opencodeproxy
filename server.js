@@ -1,4 +1,4 @@
-// server.js - Fix cho tất cả model (Chỉ thêm những phần cần thiết)
+// server.js - OpenAI to OpenCode Zen Proxy (Universal Fix)
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -28,6 +28,92 @@ const MODEL_LIST = Object.keys(MODEL_MAPPING).map(model => ({
   permission: []
 }));
 
+// ===== HÀM CHUẨN HÓA CONTENT =====
+function extractContent(message) {
+  // Thử các field theo thứ tự ưu tiên
+  const fields = [
+    message.content,
+    message.reasoning,
+    message.reasoning_content,
+    message.text,
+    message.response,
+    message.output
+  ];
+  
+  // Lấy field đầu tiên có giá trị
+  for (const field of fields) {
+    if (field && typeof field === 'string' && field.trim().length > 0) {
+      return field.trim();
+    }
+  }
+  
+  // Nếu là object, thử chuyển thành text
+  if (message.content && typeof message.content === 'object') {
+    try {
+      return JSON.stringify(message.content);
+    } catch (e) {
+      return 'Content in object format';
+    }
+  }
+  
+  return null;
+}
+
+// ===== HÀM CHUẨN HÓA RESPONSE =====
+function normalizeResponse(data, originalModel) {
+  const choice = data.choices?.[0] || {};
+  const message = choice.message || {};
+  
+  // 1. Trích xuất content từ nhiều nguồn
+  let content = extractContent(message);
+  
+  // 2. Nếu không có content, thử lấy từ delta (streaming đã gộp)
+  if (!content && data.choices?.[0]?.delta) {
+    content = extractContent(data.choices[0].delta);
+  }
+  
+  // 3. Nếu vẫn không có, tạo fallback
+  if (!content) {
+    content = "I'm here to help! What would you like to know?";
+  }
+  
+  // 4. Xóa tất cả các field không cần thiết
+  const cleanMessage = {
+    role: 'assistant',
+    content: content
+  };
+  
+  // 5. Tạo response chuẩn OpenAI
+  return {
+    id: data.id || `chatcmpl-${Date.now()}`,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: originalModel || 'mimo-v2.5-free',
+    choices: [{
+      index: 0,
+      message: cleanMessage,
+      finish_reason: choice.finish_reason || 'stop'
+    }],
+    usage: data.usage || {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0
+    }
+  };
+}
+
+// ===== HÀM CHUẨN HÓA STREAM =====
+function normalizeStreamDelta(delta) {
+  // Trích xuất content từ nhiều nguồn
+  let content = extractContent(delta);
+  
+  // Tạo delta mới chỉ có content
+  return {
+    content: content || ' '
+  };
+}
+
+// Health check
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -36,10 +122,12 @@ app.get('/health', (req, res) => {
   });
 });
 
+// List models
 app.get('/v1/models', (req, res) => {
   res.json({ object: 'list', data: MODEL_LIST });
 });
 
+// Chat completions
 app.post('/v1/chat/completions', async (req, res) => {
   if (!ZEN_API_KEY) {
     return res.status(500).json({ 
@@ -56,6 +144,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 
   try {
+    // Lấy model
     let zenModel = MODEL_MAPPING[model];
     if (!zenModel) {
       if (model?.startsWith('opencode/')) {
@@ -64,14 +153,13 @@ app.post('/v1/chat/completions', async (req, res) => {
       zenModel = zenModel || 'mimo-v2.5-free';
     }
 
-    // ===== FIX 1: Tăng max_tokens cho các model cần nhiều token =====
+    // Tự động điều chỉnh max_tokens dựa trên model
     let requestMaxTokens = Math.min(max_tokens || 1024, 4096);
-    
-    // Deepseek cần nhiều token hơn
     if (zenModel === 'deepseek-v4-flash-free') {
       requestMaxTokens = Math.min(max_tokens || 2048, 8192);
     }
 
+    // Gọi API
     const response = await axios.post(
       `${ZEN_API_BASE}/chat/completions`,
       {
@@ -94,7 +182,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     );
 
     if (stream) {
-      return handleStream(response, res);
+      return handleStream(response, res, model);
     }
 
     return handleResponse(response.data, res, model);
@@ -106,8 +194,8 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// ===== FIX 2: Xử lý cả reasoning_content =====
-function handleStream(response, res) {
+// ===== STREAMING HANDLER =====
+function handleStream(response, res, originalModel) {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -130,21 +218,27 @@ function handleStream(response, res) {
       try {
         const data = JSON.parse(line.slice(6));
         const delta = data.choices?.[0]?.delta;
+        
         if (delta) {
-          // FIX: Lấy content từ nhiều nguồn
-          let content = delta.content || '';
-          if (!content) {
-            content = delta.reasoning || delta.reasoning_content || '';
-          }
-          delta.content = content;
+          // Chuẩn hóa delta - chỉ giữ content
+          const normalizedDelta = normalizeStreamDelta(delta);
           
-          // Xóa hết reasoning fields
-          delete delta.reasoning;
-          delete delta.reasoning_content;
-          delete delta.reasoning_details;
-          delete delta.refusal;
+          // Tạo data mới với delta đã chuẩn hóa
+          const normalizedData = {
+            ...data,
+            choices: [{
+              ...data.choices[0],
+              delta: {
+                role: 'assistant',
+                content: normalizedDelta.content
+              }
+            }]
+          };
+          
+          res.write(`data: ${JSON.stringify(normalizedData)}\n\n`);
+        } else {
+          res.write(`data: ${JSON.stringify(data)}\n\n`);
         }
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
       } catch {
         res.write(`${line}\n`);
       }
@@ -155,39 +249,14 @@ function handleStream(response, res) {
   response.data.on('error', () => res.end());
 }
 
-// ===== FIX 3: Xử lý cả reasoning_content trong response =====
+// ===== NON-STREAMING HANDLER =====
 function handleResponse(data, res, originalModel) {
-  const message = data.choices?.[0]?.message || {};
-  
-  // FIX: Lấy content từ nhiều nguồn
-  let content = message.content || '';
-  if (!content) {
-    content = message.reasoning || message.reasoning_content || '';
-  }
-  if (!content) {
-    content = 'No response generated.';
-  }
-
-  // Xóa hết reasoning fields
-  delete message.reasoning;
-  delete message.reasoning_content;
-  delete message.reasoning_details;
-  delete message.refusal;
-
-  res.json({
-    id: data.id || `chatcmpl-${Date.now()}`,
-    object: 'chat.completion',
-    created: Math.floor(Date.now() / 1000),
-    model: originalModel || 'mimo-v2.5-free',
-    choices: [{
-      index: 0,
-      message: { role: 'assistant', content },
-      finish_reason: data.choices?.[0]?.finish_reason || 'stop'
-    }],
-    usage: data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-  });
+  // Chuẩn hóa response
+  const normalized = normalizeResponse(data, originalModel);
+  res.json(normalized);
 }
 
+// 404 handler
 app.all('*', (req, res) => {
   res.status(404).json({ 
     error: { message: 'Endpoint not found', type: 'invalid_request_error' } 
