@@ -28,31 +28,40 @@ const MODEL_LIST = Object.keys(MODEL_MAPPING).map(model => ({
   permission: []
 }));
 
-// ===== HÀM CHUẨN HÓA CONTENT =====
+// ===== HÀM CHUẨN HÓA CONTENT (ĐÃ SỬA VẤN ĐỀ ARRAY & NULL) =====
 function extractContent(message) {
-  // Thử các field theo thứ tự ưu tiên
+  if (!message) return null;
+
+  // 1. Nếu content là Mảng (chuẩn Anthropic / OpenAI multi-part)
+  if (Array.isArray(message.content)) {
+    const textParts = message.content
+      .filter(part => part && (part.type === 'text' || part.text))
+      .map(part => (typeof part.text === 'string' ? part.text : part));
+    if (textParts.length > 0) return textParts.join('\n').trim();
+  }
+
+  // 2. Thử các field chuỗi theo thứ tự ưu tiên
   const fields = [
     message.content,
+    message.reasoning_content, // Ưu tiên suy luận trước nếu nội dung chính rỗng
     message.reasoning,
-    message.reasoning_content,
     message.text,
     message.response,
     message.output
   ];
   
-  // Lấy field đầu tiên có giá trị
   for (const field of fields) {
     if (field && typeof field === 'string' && field.trim().length > 0) {
       return field.trim();
     }
   }
   
-  // Nếu là object, thử chuyển thành text
+  // 3. Nếu là object nhưng không phải array
   if (message.content && typeof message.content === 'object') {
     try {
       return JSON.stringify(message.content);
     } catch (e) {
-      return 'Content in object format';
+      return null;
     }
   }
   
@@ -102,17 +111,6 @@ function normalizeResponse(data, originalModel) {
   };
 }
 
-// ===== HÀM CHUẨN HÓA STREAM =====
-function normalizeStreamDelta(delta) {
-  // Trích xuất content từ nhiều nguồn
-  let content = extractContent(delta);
-  
-  // Tạo delta mới chỉ có content
-  return {
-    content: content || ' '
-  };
-}
-
 // Health check
 app.get('/health', (req, res) => {
   res.json({
@@ -135,7 +133,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
   }
 
-  const { model, messages, temperature, max_tokens, stream } = req.body;
+  const { model, messages, temperature, max_tokens, stream, reasoning_effort } = req.body;
 
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ 
@@ -159,17 +157,24 @@ app.post('/v1/chat/completions', async (req, res) => {
       requestMaxTokens = Math.min(max_tokens || 2048, 8192);
     }
 
-    // Gọi API
+    // Cấu hình payload gửi đi (BỎ reasoning_effort gán cứng 'none')
+    const payload = {
+      model: zenModel,
+      messages,
+      temperature: temperature ?? 0.7,
+      max_tokens: requestMaxTokens,
+      stream: stream || false
+    };
+
+    // Chỉ truyền reasoning_effort khi client thực sự gửi lên
+    if (reasoning_effort) {
+      payload.reasoning_effort = reasoning_effort;
+    }
+
+    // Gọi API Upstream
     const response = await axios.post(
       `${ZEN_API_BASE}/chat/completions`,
-      {
-        model: zenModel,
-        messages,
-        temperature: temperature ?? 0.7,
-        max_tokens: requestMaxTokens,
-        stream: stream || false,
-        reasoning_effort: 'none'
-      },
+      payload,
       {
         headers: {
           'Authorization': `Bearer ${ZEN_API_KEY}`,
@@ -220,25 +225,13 @@ function handleStream(response, res, originalModel) {
         const delta = data.choices?.[0]?.delta;
         
         if (delta) {
-          // Chuẩn hóa delta - chỉ giữ content
-          const normalizedDelta = normalizeStreamDelta(delta);
-          
-          // Tạo data mới với delta đã chuẩn hóa
-          const normalizedData = {
-            ...data,
-            choices: [{
-              ...data.choices[0],
-              delta: {
-                role: 'assistant',
-                content: normalizedDelta.content
-              }
-            }]
-          };
-          
-          res.write(`data: ${JSON.stringify(normalizedData)}\n\n`);
-        } else {
-          res.write(`data: ${JSON.stringify(data)}\n\n`);
+          const extractedContent = extractContent(delta);
+          if (extractedContent) {
+            data.choices[0].delta.content = extractedContent;
+          }
         }
+        
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
       } catch {
         res.write(`${line}\n`);
       }
